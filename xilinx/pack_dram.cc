@@ -179,15 +179,14 @@ void XilinxPacker::pack_dram()
 
     // Rules for upper and lower RAMD32E
     dram32_6_rules[ctx->id("RAMD32")].new_type = id_SLICE_LUTX;
-    dram32_6_rules[ctx->id("RAMD32")].param_xform[ctx->id("IS_CLK_INVERTED")] = ctx->id("IS_WCLK_INVERTED");
-    dram32_6_rules[ctx->id("RAMD32")].set_attrs.emplace_back(ctx->id("X_LUT_AS_DRAM"), "1");
+    dram32_6_rules[ctx->id("RAMD32")].set_attrs.emplace_back(ctx->id("X_LUT_AS_DRAM"), Property(1));
     for (int i = 0; i < 5; i++)
         dram32_6_rules[ctx->id("RAMD32")].port_xform[ctx->id("RADR" + std::to_string(i))] =
                 ctx->id("A" + std::to_string(i + 1));
     for (int i = 0; i < 5; i++)
         dram32_6_rules[ctx->id("RAMD32")].port_xform[ctx->id("WADR" + std::to_string(i))] =
                 ctx->id("WA" + std::to_string(i + 1));
-    dram32_6_rules[ctx->id("RAMD32")].port_xform[ctx->id("I")] = id_DI2;
+    dram32_6_rules[ctx->id("RAMD32")].port_xform[ctx->id("I")] = id_DI1;
     dram32_6_rules[ctx->id("RAMD32")].port_xform[ctx->id("O")] = id_O6;
 
     dram32_5_rules = dram32_6_rules;
@@ -246,6 +245,11 @@ void XilinxPacker::pack_dram()
         for (int i = 0; i < dt.abits; i++)
             dcs.wa.push_back(get_net_or_empty(
                     ci, ctx->id(dt.abits <= 6 ? ("A" + std::to_string(i)) : ("A[" + std::to_string(i) + "]"))));
+        if (dt.abits == 5) {
+            // 32-deep DRAM lives in the HIGH LUT5, so A6 is tied high and the
+            // INIT pattern is shifted into the upper half (see below).
+            dcs.wa.push_back(ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
+        }
         dcs.wclk = get_net_or_empty(ci, ctx->id("WCLK"));
         dcs.we = get_net_or_empty(ci, ctx->id("WE"));
         dcs.wclk_inv = bool_or_default(ci->params, ctx->id("IS_WCLK_INVERTED"));
@@ -324,13 +328,23 @@ void XilinxPacker::pack_dram()
                 if (get_net_or_empty(cell, ctx->id("DPO")) != nullptr)
                     z_size++;
 
+                auto init_property=get_or_default(cell->params, ctx->id("INIT"), Property(0));
+                // Only the high-order LUT5 is used, str is in reverse order, 
+				// first fill the back with zeros to make up 32 bits, 
+				// then insert 32 zeros in the front, which is equivalent to shifting left 32 bits
+                init_property.str.append(32 - init_property.str.size(), '0');
+                init_property.str.insert(0, 32, '0');
+                init_property.update_intval();
+
+                bool spo_is_base = false;
                 if (z == (height - 1) || (z - z_size + 1) < 0) {
                     z = (height - 1);
                     // Topmost cell is the write address input
                     std::vector<NetInfo *> address(cs.wa.begin(), cs.wa.begin() + std::min<size_t>(cs.wa.size(), 5));
-                    address.push_back(ctx->nets[ctx->id("$PACKER_GND_NET")].get());
+                    address.push_back(ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
                     base = create_dram_lut(cell->name.str(ctx) + "/ADDR", nullptr, cs, address, nullptr, nullptr, z);
                     z--;
+                    spo_is_base = true;
                 }
 
                 NetInfo *dpo = get_net_or_empty(cell, ctx->id("DPO"));
@@ -340,19 +354,19 @@ void XilinxPacker::pack_dram()
 
                 NetInfo *di = get_net_or_empty(cell, ctx->id("D"));
                 if (spo != nullptr) {
-                    if (z == (height - 2)) {
+                    if (spo_is_base) {
                         // Can fold DPO into address buffer
                         connect_port(ctx, spo, base, ctx->id("O6"));
                         connect_port(ctx, di, base, ctx->id("DI1"));
                         if (cell->params.count(ctx->id("INIT")))
-                            base->params[ctx->id("INIT")] = cell->params[ctx->id("INIT")];
+                            base->params[ctx->id("INIT")] = init_property;
                     } else {
                         std::vector<NetInfo *> address(cs.wa.begin(),
                                                        cs.wa.begin() + std::min<size_t>(cs.wa.size(), 5));
-                        address.push_back(ctx->nets[ctx->id("$PACKER_GND_NET")].get());
+                        address.push_back(ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
                         CellInfo *dpr = create_dram_lut(cell->name.str(ctx) + "/SP", base, cs, address, di, spo, z);
                         if (cell->params.count(ctx->id("INIT")))
-                            dpr->params[ctx->id("INIT")] = cell->params[ctx->id("INIT")];
+                            dpr->params[ctx->id("INIT")] = init_property;
                         z--;
                     }
                 }
