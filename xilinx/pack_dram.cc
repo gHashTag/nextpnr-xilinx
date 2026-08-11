@@ -493,11 +493,41 @@ void XilinxPacker::pack_dram()
                 }
                 packed_cells.insert(cell->name);
             }
+        } else if (cs.memtype == ctx->id("RAM32X1S")) {
+            int z = (height - 1);
+            CellInfo *base = nullptr;
+            for (auto cell : group.second) {
+                NPNR_ASSERT(cell->type == ctx->id("RAM32X1S"));
+
+                // Only the high LUT5 is used and the INIT string is in reverse
+                // order: pad the back to 32 bits, then insert 32 zeros at the
+                // front, which is a left shift by 32.
+                auto init_property = get_or_default(cell->params, ctx->id("INIT"), Property(0));
+                init_property.str.append(32 - init_property.str.size(), '0');
+                init_property.str.insert(0, 32, '0');
+                init_property.update_intval();
+
+                NetInfo *di = get_net_or_empty(cell, ctx->id("D"));
+                NetInfo *dout = get_net_or_empty(cell, ctx->id("O"));
+                disconnect_port(ctx, cell, ctx->id("O"));
+
+                if (z < 0)
+                    z = (height - 1);
+                std::vector<NetInfo *> address(cs.wa.begin(), cs.wa.begin() + std::min<size_t>(cs.wa.size(), 5));
+                address.push_back(ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
+                CellInfo *ram_lut =
+                        create_dram_lut(cell->name.str(ctx), z == (height - 1) ? nullptr : base, cs, address, di, dout, z);
+                if (z == (height - 1))
+                    base = ram_lut;
+                if (cell->params.count(ctx->id("INIT")))
+                    ram_lut->params[ctx->id("INIT")] = init_property;
+                z--;
+                packed_cells.insert(cell->name);
+            }
         } else if (cs.memtype == ctx->id("RAMS32")
                 || cs.memtype == ctx->id("RAMD32")
                 || cs.memtype == ctx->id("RAMS64E")
-                || cs.memtype == ctx->id("RAMD64E")
-                || cs.memtype == ctx->id("RAM32X1S")) {
+                || cs.memtype == ctx->id("RAMD64E")) {
             log_error("Cannot pack unsupported primitive: %s\n", cs.memtype.c_str(ctx));
         }
     }
