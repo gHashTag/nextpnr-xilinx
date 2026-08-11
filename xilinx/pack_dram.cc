@@ -154,6 +154,7 @@ void XilinxPacker::pack_dram()
     std::unordered_map<IdString, DRAMType> dram_types;
 
     dram_types[ctx->id("RAM32X1S")] = {5, 1, 0};
+    dram_types[ctx->id("RAM32X2S")] = {5, 2, 0};
     dram_types[ctx->id("RAM32X1D")] = {5, 1, 1};
     dram_types[ctx->id("RAM64X1S")] = {6, 1, 0};
     dram_types[ctx->id("RAM64X1D")] = {6, 1, 1};
@@ -522,6 +523,46 @@ void XilinxPacker::pack_dram()
                 if (cell->params.count(ctx->id("INIT")))
                     ram_lut->params[ctx->id("INIT")] = init_property;
                 z--;
+                packed_cells.insert(cell->name);
+            }
+        } else if (cs.memtype == ctx->id("RAM32X2S")) {
+            int z = (height - 1);
+            CellInfo *base = nullptr;
+            for (auto cell : group.second) {
+                NPNR_ASSERT(cell->type == ctx->id("RAM32X2S"));
+                // Two LUTs per cell, so a SLICEM holds at most two of these.
+                if (z < 1) {
+                    z = (height - 1);
+                    base = nullptr;
+                }
+                // One set of address lines is shared by both halves; the sixth
+                // is tied high because 32-deep DRAM sits in the high LUT5.
+                std::vector<NetInfo *> address;
+                for (int i = 0; i < 5; i++)
+                    address.push_back(get_net_or_empty(cell, ctx->id("A" + std::to_string(i))));
+                address.push_back(ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
+
+                for (int i = 0; i < 2; i++) {
+                    NetInfo *di = get_net_or_empty(cell, ctx->id("D" + std::to_string(i)));
+                    NetInfo *dout = get_net_or_empty(cell, ctx->id("O" + std::to_string(i)));
+                    disconnect_port(ctx, cell, ctx->id("O" + std::to_string(i)));
+
+                    CellInfo *ram_lut =
+                            create_dram_lut(cell->name.str(ctx) + "/RAM32X1S" + std::to_string(i) + "/SP", base,
+                                            cs, address, di, dout, z);
+
+                    IdString init_param = ctx->id("INIT_0" + std::to_string(i));
+                    if (cell->params.count(init_param)) {
+                        auto init_property = cell->params.at(init_param);
+                        init_property.str.append(32 - init_property.str.size(), '0');
+                        init_property.str.insert(0, 32, '0');
+                        init_property.update_intval();
+                        ram_lut->params[ctx->id("INIT")] = init_property;
+                    }
+                    if (base == nullptr)
+                        base = ram_lut;
+                    z--;
+                }
                 packed_cells.insert(cell->name);
             }
         } else if (cs.memtype == ctx->id("RAMS32")
